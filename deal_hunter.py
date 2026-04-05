@@ -8,24 +8,33 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-#   DEAL HUNTER — 100% SERPAPI
+#   DEAL HUNTER — VERSION RENDER.COM
+#   Clés dans variables d'environnement — jamais dans le code
 #   Tous les sites Canada + USA + erreurs de prix
-#   Critères larges pour capturer le maximum
 # ============================================================
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8565261834:AAG9cnWMpAuVLSsGyvPBCTApfg2Y0RSTO1Q")
-TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT", "1252259498")
-SERPAPI_KEY    = os.environ.get("SERPAPI_KEY", "407fca2bc9bc6dd3ecdc7fda39d7183a2b10039def40d3ef8454a842a2458715")
+# Clés UNIQUEMENT depuis variables d'environnement
+# Configure ces variables dans Render.com Dashboard → Environment
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT", "")
+SERPAPI_KEY    = os.environ.get("SERPAPI_KEY", "")
 
-MIN_DISCOUNT      = 25
-MIN_PRICE         = 3
-MAX_PRICE         = 2000
-MIN_SAVINGS       = 5
-SCORE_DEAL        = 4
-MAX_ALERTS        = 25
-MAX_WORKERS       = 8
-ERROR_PRICE_RATIO = 0.30
-HISTORY_FILE      = "deal_hunter_history.json"
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT or not SERPAPI_KEY:
+    print("ERREUR: Variables d'environnement manquantes!")
+    print("Configure TELEGRAM_TOKEN, TELEGRAM_CHAT, SERPAPI_KEY dans Render.com")
+    exit(1)
+
+# ---- PARAMÈTRES ----
+SCAN_INTERVAL = 300       # 5 minutes entre chaque scan
+MIN_DISCOUNT  = 25
+MIN_PRICE     = 3
+MAX_PRICE     = 2000
+MIN_SAVINGS   = 5
+SCORE_DEAL    = 4
+MAX_ALERTS    = 25
+MAX_WORKERS   = 8
+ERROR_RATIO   = 0.30
+HISTORY_FILE  = "deal_hunter_history.json"
 
 TRUSTED_CA = [
     "walmart","canadian tire","best buy","staples","home depot","rona",
@@ -77,6 +86,10 @@ WALMART_US = [
     "toys clearance","clothing clearance","tools clearance","baby clearance",
 ]
 
+# ============================================================
+#   UTILITAIRES
+# ============================================================
+
 def make_id(link, price):
     return hashlib.md5(f"{link}_{price}".encode()).hexdigest()[:16]
 
@@ -90,7 +103,8 @@ def is_fake(price, original):
 
 def is_valid(name, price):
     if not name or len(name) < 3: return False
-    for b in ["gift card","carte cadeau","warranty","garantie","subscription","abonnement","digital download","activation code"]:
+    for b in ["gift card","carte cadeau","warranty","garantie",
+              "subscription","abonnement","digital download","activation code"]:
         if b in name.lower(): return False
     return MIN_PRICE <= price <= MAX_PRICE
 
@@ -103,7 +117,7 @@ def detect_error(price, original):
     disc  = ((original - price) / original) * 100
     if ratio < 0.10 and original >= 20:
         return True, f"💣 ERREUR EXTRÊME: ${price:.2f} au lieu de ${original:.2f}"
-    if ratio < ERROR_PRICE_RATIO and original >= 15:
+    if ratio < ERROR_RATIO and original >= 15:
         return True, f"⚠️ ERREUR DE PRIX: ${price:.2f} au lieu de ${original:.2f} (-{disc:.0f}%)"
     return False, ""
 
@@ -127,11 +141,16 @@ def score_deal(discount, price, original, is_canada, price_error, multi=False):
     if multi: score += 2; reasons.append("✅ multi-site")
     return score, " | ".join(reasons)
 
+# ============================================================
+#   TELEGRAM
+# ============================================================
+
 def send_telegram(msg):
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False},
+            json={"chat_id": TELEGRAM_CHAT, "text": msg,
+                  "parse_mode": "HTML", "disable_web_page_preview": False},
             timeout=15
         )
         return resp.status_code == 200
@@ -170,6 +189,10 @@ def format_deal(deal):
         f"⏰ {datetime.now().strftime('%H:%M:%S')}"
     )
 
+# ============================================================
+#   HISTORIQUE
+# ============================================================
+
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -197,64 +220,27 @@ def should_alert(pid, price):
     except: pass
     return False
 
+# ============================================================
+#   MULTI-SITE TRACKER
+# ============================================================
+
 class MultiSiteTracker:
     def __init__(self): self.products = {}
+    def reset(self): self.products = {}
     def add(self, deal):
         key = hashlib.md5(deal["name"][:20].lower().encode()).hexdigest()[:8]
         if key not in self.products: self.products[key] = []
         self.products[key].append(deal)
     def is_multi(self, deal):
         key = hashlib.md5(deal["name"][:20].lower().encode()).hexdigest()[:8]
-        return any(o["id"] != deal["id"] and o["store"] != deal["store"] for o in self.products.get(key, []))
+        return any(o["id"] != deal["id"] and o["store"] != deal["store"]
+                   for o in self.products.get(key, []))
 
 tracker = MultiSiteTracker()
 
-def process_result(r, market, source_label):
-    price = r.get("extracted_price", 0)
-    if not price:
-        try: price = float(re.sub(r'[^\d.]','',str(r.get("price",""))))
-        except: price = 0
-
-    original = 0
-    for field in ["old_price","was_price","original_price","list_price"]:
-        val = r.get(field,"")
-        if val:
-            try:
-                original = float(re.sub(r'[^\d.]','',str(val)))
-                if original > price: break
-            except: pass
-
-    if not price or not original or original <= price: return None
-    if is_fake(price, original): return None
-
-    discount = ((original - price) / original) * 100
-    if discount < MIN_DISCOUNT: return None
-
-    name  = r.get("title","") or r.get("name","")
-    link  = r.get("link","") or r.get("product_link","") or r.get("product_page_url","")
-    store = r.get("source","") or r.get("seller","") or r.get("store","")
-
-    if not name or not link or not store: return None
-    if "google." in link.lower(): return None
-    if is_blocked(store): return None
-    if not is_valid(name, price): return None
-
-    is_ca    = any(t in store.lower() for t in TRUSTED_CA)
-    is_us    = any(t in store.lower() for t in TRUSTED_US)
-    if not is_ca and not is_us and discount < 60: return None
-
-    pid          = make_id(link, price)
-    is_error, em = detect_error(price, original)
-    sc, sr       = score_deal(discount, price, original, is_ca, is_error)
-    if sc < SCORE_DEAL: return None
-
-    return {
-        "id": pid, "name": name, "price": price, "original_price": original,
-        "discount": discount, "link": link, "store": store,
-        "market": "🇨🇦" if is_ca else "🇺🇸",
-        "score": sc, "reason": sr, "price_error": is_error,
-        "error_msg": em, "source": source_label,
-    }
+# ============================================================
+#   SCRAPERS
+# ============================================================
 
 def scan_google(query, market="CA"):
     gl     = "ca" if market == "CA" else "us"
@@ -269,8 +255,45 @@ def scan_google(query, market="CA"):
         resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
         if resp.status_code != 200: return deals
         for r in resp.json().get("shopping_results", []):
-            deal = process_result(r, market, f"Google Shopping {market}")
-            if deal: deals.append(deal)
+            price = r.get("extracted_price", 0)
+            if not price:
+                try: price = float(re.sub(r'[^\d.]','',str(r.get("price",""))))
+                except: price = 0
+            original = 0
+            for field in ["old_price","was_price","original_price","list_price"]:
+                val = r.get(field,"")
+                if val:
+                    try:
+                        original = float(re.sub(r'[^\d.]','',str(val)))
+                        if original > price: break
+                    except: pass
+            if not price or not original or original <= price: continue
+            if is_fake(price, original): continue
+            discount = ((original - price) / original) * 100
+            if discount < MIN_DISCOUNT: continue
+            name  = r.get("title","")
+            link  = r.get("link","") or r.get("product_link","")
+            store = r.get("source", r.get("seller",""))
+            if not name or not link or not store: continue
+            if "google." in link.lower(): continue
+            if is_blocked(store): continue
+            if not is_valid(name, price): continue
+            is_ca        = any(t in store.lower() for t in TRUSTED_CA)
+            is_us        = any(t in store.lower() for t in TRUSTED_US)
+            if not is_ca and not is_us and discount < 60: continue
+            pid          = make_id(link, price)
+            is_error, em = detect_error(price, original)
+            sc, sr       = score_deal(discount, price, original, is_ca, is_error)
+            if sc >= SCORE_DEAL:
+                deals.append({
+                    "id": pid, "name": name, "price": price,
+                    "original_price": original, "discount": discount,
+                    "link": link, "store": store,
+                    "market": "🇨🇦" if is_ca else "🇺🇸",
+                    "score": sc, "reason": sr,
+                    "price_error": is_error, "error_msg": em,
+                    "source": f"Google Shopping {market}",
+                })
     except Exception as e:
         print(f"Google erreur [{query[:20]}]: {e}")
     return deals
@@ -282,10 +305,9 @@ def scan_walmart(query, market="CA"):
         resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
         if resp.status_code != 200: return deals
         for r in resp.json().get("organic_results", []):
-            # Adapte le format Walmart
             price = 0
             pm    = r.get("primary_offer",{})
-            if isinstance(pm, dict): price = pm.get("offer_price",0)
+            if isinstance(pm, dict): price = pm.get("offer_price", 0)
             original = 0
             for field in ["was_price","list_price","strike_through_price"]:
                 val = r.get(field,"")
@@ -294,13 +316,10 @@ def scan_walmart(query, market="CA"):
                         original = float(re.sub(r'[^\d.]','',str(val)))
                         if original > price: break
                     except: pass
-
             if not price or not original or original <= price: continue
             if is_fake(price, original): continue
-
             discount = ((original - price) / original) * 100
             if discount < MIN_DISCOUNT: continue
-
             name = r.get("title","")
             link = r.get("product_page_url","")
             if not link:
@@ -311,24 +330,26 @@ def scan_walmart(query, market="CA"):
             if not name or not link: continue
             if market == "CA": link = link.replace("walmart.com","walmart.ca")
             if not is_valid(name, price): continue
-
             pid          = make_id(link, price)
             is_error, em = detect_error(price, original)
             sc, sr       = score_deal(discount, price, original, market=="CA", is_error)
             if sc >= SCORE_DEAL:
                 deals.append({
-                    "id": pid, "name": name, "price": price, "original_price": original,
-                    "discount": discount, "link": link,
+                    "id": pid, "name": name, "price": price,
+                    "original_price": original, "discount": discount,
+                    "link": link,
                     "store": f"Walmart.{'ca' if market=='CA' else 'com'}",
                     "market": "🇨🇦" if market=="CA" else "🇺🇸",
-                    "score": sc, "reason": sr, "price_error": is_error,
-                    "error_msg": em, "source": f"Walmart {market} Direct",
+                    "score": sc, "reason": sr,
+                    "price_error": is_error, "error_msg": em,
+                    "source": f"Walmart {market} Direct",
                 })
     except Exception as e:
         print(f"Walmart erreur [{query[:20]}]: {e}")
     return deals
 
 def run_scan():
+    tracker.reset()
     all_deals = []
     tasks = (
         [("g_ca", q, "CA") for q in SEARCHES_CA] +
@@ -366,39 +387,80 @@ def run_scan():
         if d["id"] not in seen:
             seen.add(d["id"])
             unique.append(d)
-
     return unique
 
-def main():
-    print(f"Deal Hunter — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Rabais min: {MIN_DISCOUNT}% | Score min: {SCORE_DEAL}")
+# ============================================================
+#   LOOP PRINCIPAL 24/7
+# ============================================================
 
-    all_deals = run_scan()
-    errors    = [d for d in all_deals if d.get("price_error")]
-    print(f"Total: {len(all_deals)} | Erreurs de prix: {len(errors)}")
+def run_bot():
+    print("=" * 60)
+    print("   DEAL HUNTER — RENDER.COM 24/7")
+    print(f"   Canada 🇨🇦 + USA 🇺🇸")
+    print(f"   Rabais min: {MIN_DISCOUNT}% | Scan toutes les {SCAN_INTERVAL//60} min")
+    print("=" * 60)
 
-    new_deals = [d for d in all_deals if should_alert(d["id"], d["price"])]
-    print(f"Nouveaux: {len(new_deals)}")
-
-    if not new_deals:
-        print("Aucun nouveau deal")
-        return
-
-    new_deals.sort(
-        key=lambda x: (x.get("price_error",False), x["score"], x.get("multi_site",False)),
-        reverse=True
+    send_telegram(
+        "🤖 <b>Deal Hunter démarré sur Render!</b>\n\n"
+        "🌍 Canada 🇨🇦 + USA 🇺🇸\n"
+        "💣 Erreurs de prix: ON\n"
+        "🔥 Rabais intenses: ON\n"
+        "✅ Multi-site check: ON\n\n"
+        f"📊 Rabais min: {MIN_DISCOUNT}%\n"
+        f"⏰ Scan toutes les {SCAN_INTERVAL//60} min\n\n"
+        "Je t'envoie tout ce qui est anormal! 💰"
     )
 
-    sent = 0
-    for deal in new_deals:
-        if sent >= MAX_ALERTS: break
-        print(f"  {'💣' if deal.get('price_error') else '🔥'} Score:{deal['score']} | {deal['name'][:35]} | -{deal['discount']:.0f}% | {deal['store']}")
-        if send_telegram(format_deal(deal)):
-            save_history(deal["id"], deal)
-            sent += 1
-        time.sleep(0.3)
+    scan_count = 0
+    total_sent = 0
 
-    print(f"Terminé — {sent} deals envoyés")
+    while True:
+        scan_count += 1
+        start       = datetime.now()
+
+        print(f"\n{'='*60}")
+        print(f"SCAN #{scan_count} — {start.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*60}")
+
+        all_deals = run_scan()
+        errors    = [d for d in all_deals if d.get("price_error")]
+        print(f"   Total: {len(all_deals)} | Erreurs: {len(errors)}")
+
+        new_deals = [d for d in all_deals if should_alert(d["id"], d["price"])]
+        print(f"   Nouveaux: {len(new_deals)}")
+
+        new_deals.sort(
+            key=lambda x: (x.get("price_error",False), x["score"], x.get("multi_site",False)),
+            reverse=True
+        )
+
+        sent = 0
+        for deal in new_deals:
+            if sent >= MAX_ALERTS: break
+            emoji = "💣" if deal.get("price_error") else "🔥"
+            print(f"   {emoji} Score:{deal['score']} | {deal['name'][:35]} | -{deal['discount']:.0f}% | {deal['store']}")
+            if send_telegram(format_deal(deal)):
+                save_history(deal["id"], deal)
+                total_sent += 1
+                sent       += 1
+                print(f"   ✓ Envoyé!")
+            time.sleep(0.3)
+
+        duration = (datetime.now() - start).seconds
+        print(f"\n   Scan #{scan_count} | {duration}s | Envoyés: {sent} | Total: {total_sent}")
+
+        if scan_count % 12 == 0:
+            send_telegram(
+                f"📊 <b>Rapport horaire</b>\n\n"
+                f"🔄 Scans: {scan_count}\n"
+                f"💰 Deals envoyés: {total_sent}\n"
+                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"🤖 Bot actif sur Render!"
+            )
+
+        wait = max(SCAN_INTERVAL - duration, 10)
+        print(f"   Prochain scan dans {wait}s...")
+        time.sleep(wait)
 
 if __name__ == "__main__":
-    main()
+    run_bot()
