@@ -9,13 +9,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-#   DEAL HUNTER ELITE V6
-#   ✅ Matching produit intelligent (normalisé)
-#   ✅ Price velocity detection (vitesse du drop)
-#   ✅ Cross-site arbitrage detection
-#   ✅ Category awareness (seuils par catégorie)
-#   ✅ Price memory SQLite
-#   ✅ Anomaly detection vs moyenne historique
+#   DEAL HUNTER ELITE V6 — STABLE
+#   Price Memory + Velocity + Arbitrage + Categories
 # ============================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -29,32 +24,29 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT or not SERPAPI_KEY:
 SCAN_INTERVAL  = 300
 MIN_PRICE      = 3
 MAX_PRICE      = 2000
-MAX_WORKERS    = 8
+MAX_WORKERS    = 6
 DB_FILE        = "price_memory.db"
 MAX_ALERTS     = 25
 
-# Seuils d'anomalie
 ANOMALY_ERROR  = 0.50
 ANOMALY_HOT    = 0.35
 ANOMALY_GOOD   = 0.25
-VELOCITY_ALERT = 0.20   # Drop de 20%+ en 1 scan = velocity alert
+VELOCITY_ALERT = 0.20
 
-# ---- CATÉGORIES AVEC SEUILS PERSONNALISÉS ----
 CATEGORIES = {
-    "tv":          {"keywords": ["tv","television","qled","oled","4k screen","monitor"],         "min_savings": 80,  "min_discount": 30},
-    "laptop":      {"keywords": ["laptop","notebook","macbook","chromebook","ultrabook"],         "min_savings": 100, "min_discount": 25},
-    "phone":       {"keywords": ["iphone","samsung galaxy","pixel","smartphone","android phone"], "min_savings": 80,  "min_discount": 25},
-    "appliance":   {"keywords": ["washer","dryer","fridge","dishwasher","microwave","vacuum"],    "min_savings": 60,  "min_discount": 25},
-    "gaming":      {"keywords": ["ps5","xbox","nintendo","playstation","gaming","controller"],    "min_savings": 30,  "min_discount": 25},
-    "tool":        {"keywords": ["drill","saw","wrench","screwdriver","dewalt","makita","ryobi"], "min_savings": 30,  "min_discount": 30},
-    "furniture":   {"keywords": ["sofa","couch","desk","chair","table","shelf","dresser"],        "min_savings": 50,  "min_discount": 30},
-    "toy":         {"keywords": ["toy","lego","barbie","puzzle","board game","playset"],         "min_savings": 10,  "min_discount": 30},
-    "clothing":    {"keywords": ["shirt","pants","jacket","shoes","boots","dress","coat"],        "min_savings": 15,  "min_discount": 40},
-    "beauty":      {"keywords": ["serum","moisturizer","shampoo","conditioner","makeup","cream"], "min_savings": 8,   "min_discount": 30},
-    "baby":        {"keywords": ["baby","infant","diaper","wipes","formula","stroller"],         "min_savings": 10,  "min_discount": 30},
-    "sport":       {"keywords": ["fitness","yoga","gym","bicycle","treadmill","weights"],         "min_savings": 20,  "min_discount": 30},
-    "electronics": {"keywords": ["headphone","earbuds","speaker","camera","tablet","charger"],   "min_savings": 20,  "min_discount": 30},
-    "default":     {"keywords": [],                                                               "min_savings": 10,  "min_discount": 30},
+    "tv":          {"keywords": ["tv","television","qled","oled","4k","monitor"],              "min_savings": 80},
+    "laptop":      {"keywords": ["laptop","notebook","macbook","chromebook"],                   "min_savings": 100},
+    "phone":       {"keywords": ["iphone","samsung galaxy","pixel","smartphone"],               "min_savings": 80},
+    "appliance":   {"keywords": ["washer","dryer","fridge","dishwasher","microwave","vacuum"],  "min_savings": 60},
+    "gaming":      {"keywords": ["ps5","xbox","nintendo","playstation","gaming"],               "min_savings": 30},
+    "tool":        {"keywords": ["drill","saw","wrench","dewalt","makita","ryobi"],             "min_savings": 25},
+    "furniture":   {"keywords": ["sofa","couch","desk","chair","table","shelf"],                "min_savings": 50},
+    "toy":         {"keywords": ["toy","lego","puzzle","board game","playset"],                 "min_savings": 8},
+    "clothing":    {"keywords": ["shirt","pants","jacket","shoes","boots","dress"],             "min_savings": 10},
+    "beauty":      {"keywords": ["serum","moisturizer","shampoo","conditioner","makeup"],       "min_savings": 5},
+    "baby":        {"keywords": ["baby","infant","diaper","wipes","stroller"],                  "min_savings": 8},
+    "electronics": {"keywords": ["headphone","earbuds","speaker","camera","tablet"],            "min_savings": 15},
+    "default":     {"keywords": [],                                                              "min_savings": 8},
 }
 
 TRUSTED_CA = [
@@ -65,8 +57,8 @@ TRUSTED_CA = [
 ]
 TRUSTED_US = [
     "target","walmart","home depot","lowes","best buy","staples",
-    "walgreens","cvs","costco","sams club","kohls","macys","nordstrom",
-    "tj maxx","marshalls","overstock","wayfair","chewy","petco","rei",
+    "walgreens","cvs","costco","kohls","macys","overstock","wayfair",
+    "chewy","petco","rei","tj maxx","marshalls",
 ]
 BLOCKED = ["ebay","aliexpress","temu","wish","alibaba","shein","banggood","dhgate","etsy"]
 
@@ -81,66 +73,46 @@ SEARCHES_CA = [
     "clothing clearance canada","tools clearance canada",
     "sports clearance canada","baby clearance canada",
     "beauty clearance canada","gaming clearance canada",
-    "headphones clearance canada","kitchen clearance canada",
 ]
 SEARCHES_US = [
-    "price error listing usa","pricing error clearance",
-    "clearance -80%","clearance -70%","clearance -60%",
+    "price error listing usa","clearance -80%","clearance -70%",
     "target clearance","walmart clearance rollback",
-    "home depot clearance","best buy clearance",
-    "lowes clearance","kohls clearance",
-    "electronics clearance","tv clearance",
-    "furniture clearance","toys clearance","clothing clearance",
-    "tools clearance","baby clearance","gaming clearance",
+    "home depot clearance","best buy clearance","lowes clearance",
+    "electronics clearance","tv clearance","furniture clearance",
+    "toys clearance","clothing clearance","tools clearance",
 ]
 WALMART_CA = [
     "clearance","liquidation","electronics clearance",
     "furniture clearance","toys clearance","clothing clearance",
-    "tools clearance","sports clearance","baby clearance","gaming clearance",
+    "tools clearance","sports clearance","baby clearance",
 ]
 WALMART_US = [
-    "clearance rollback","electronics clearance","furniture clearance",
-    "toys clearance","clothing clearance","tools clearance","baby clearance",
+    "clearance rollback","electronics clearance",
+    "toys clearance","clothing clearance","tools clearance",
 ]
 
 # ============================================================
-#   MATCHING PRODUIT INTELLIGENT
+#   UTILITAIRES
 # ============================================================
 
 def normalize_name(name):
-    """
-    Normalise un nom de produit pour matching cohérent
-    "iPhone 13 128GB" == "Apple iPhone 13 (128 Go)" → même hash
-    """
     name = name.lower()
     name = re.sub(r'[^a-z0-9 ]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
-
-    # Normalise les unités
     name = name.replace(" go ", " gb ").replace("giga", "gb")
-    name = name.replace(" to ", " tb ").replace("tera", "tb")
-
-    # Retire les mots génériques
     stop = {"the","a","an","and","or","for","with","in","of","to","by",
-            "new","sale","deal","clearance","canada","canadian","free",
-            "shipping","warranty","pack","set","lot"}
+            "new","sale","deal","clearance","canada","free","shipping"}
     words = [w for w in name.split() if w not in stop and len(w) > 1]
-
-    return " ".join(words[:8])  # Garde les 8 mots les plus importants
+    return " ".join(words[:8])
 
 def make_product_id(name, store):
-    """ID stable basé sur nom normalisé + store"""
-    normalized = normalize_name(name)
-    raw        = f"{normalized}_{store.lower().strip()}"
+    raw = f"{normalize_name(name)}_{store.lower().strip()}"
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
 def make_product_key(name):
-    """Clé de matching cross-site (sans le store)"""
-    normalized = normalize_name(name)
-    return hashlib.md5(normalized.encode()).hexdigest()[:12]
+    return hashlib.md5(normalize_name(name).encode()).hexdigest()[:12]
 
 def detect_category(name):
-    """Détecte la catégorie du produit"""
     name_lower = name.lower()
     for cat, info in CATEGORIES.items():
         if cat == "default": continue
@@ -148,177 +120,193 @@ def detect_category(name):
             return cat
     return "default"
 
-def get_category_thresholds(name):
-    """Retourne les seuils min pour cette catégorie"""
+def get_min_savings(name):
     cat = detect_category(name)
-    return CATEGORIES[cat]["min_savings"], CATEGORIES[cat]["min_discount"], cat
+    return CATEGORIES[cat]["min_savings"], cat
 
 # ============================================================
 #   BASE DE DONNÉES
 # ============================================================
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS prices (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id  TEXT NOT NULL,
-            product_key TEXT,
-            name        TEXT,
-            store       TEXT,
-            category    TEXT,
-            price       REAL,
-            original    REAL,
-            link        TEXT,
-            market      TEXT,
-            timestamp   TEXT
-        )
-    ''')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_pid ON prices(product_id)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_pkey ON prices(product_key)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_ts ON prices(timestamp)')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS alerts_sent (
-            product_id  TEXT PRIMARY KEY,
-            last_price  REAL,
-            last_alert  TEXT,
-            times_sent  INTEGER DEFAULT 0
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS prices (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id  TEXT NOT NULL,
+                product_key TEXT,
+                name        TEXT,
+                store       TEXT,
+                category    TEXT,
+                price       REAL,
+                original    REAL,
+                link        TEXT,
+                market      TEXT,
+                timestamp   TEXT
+            )
+        ''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_pid ON prices(product_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_pkey ON prices(product_key)')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS alerts_sent (
+                product_id  TEXT PRIMARY KEY,
+                last_price  REAL,
+                last_alert  TEXT,
+                times_sent  INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print("DB initialisée")
+    except Exception as e:
+        print(f"DB erreur init: {e}")
 
 def save_price(product_id, product_key, name, store, category, price, original, link, market):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute('''
-        INSERT INTO prices (product_id, product_key, name, store, category, price, original, link, market, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (product_id, product_key, name[:100], store[:100], category,
-          price, original, link[:500], market, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute('''
+            INSERT INTO prices (product_id, product_key, name, store, category, price, original, link, market, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (product_id, product_key, name[:100], store[:100], category,
+              price, original, link[:500], market, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB save erreur: {e}")
 
 def get_price_stats(product_id):
-    """Stats de prix pour un produit spécifique"""
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    d7   = (datetime.now() - timedelta(days=7)).isoformat()
-    d30  = (datetime.now() - timedelta(days=30)).isoformat()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        d30  = (datetime.now() - timedelta(days=30)).isoformat()
+        d7   = (datetime.now() - timedelta(days=7)).isoformat()
 
-    c.execute('''
-        SELECT AVG(price), MIN(price), MAX(price), COUNT(*),
-               GROUP_CONCAT(price || '|' || timestamp ORDER BY timestamp DESC)
-        FROM prices WHERE product_id = ? AND timestamp > ?
-    ''', (product_id, d30))
-    row = c.fetchone()
+        c.execute('''
+            SELECT AVG(price), MIN(price), MAX(price), COUNT(*)
+            FROM prices WHERE product_id = ? AND timestamp > ?
+        ''', (product_id, d30))
+        row30 = c.fetchone()
 
-    c.execute('SELECT AVG(price) FROM prices WHERE product_id = ? AND timestamp > ?', (product_id, d7))
-    row7 = c.fetchone()
+        c.execute('SELECT AVG(price) FROM prices WHERE product_id = ? AND timestamp > ?', (product_id, d7))
+        row7 = c.fetchone()
 
-    conn.close()
+        # Historique récent pour velocity
+        c.execute('''
+            SELECT price FROM prices WHERE product_id = ?
+            ORDER BY timestamp DESC LIMIT 5
+        ''', (product_id,))
+        history = [r[0] for r in c.fetchall()]
 
-    if not row or not row[3]:
+        conn.close()
+
+        if not row30 or not row30[3]:
+            return None
+
+        return {
+            "avg_30d":       row30[0] or 0,
+            "min_30d":       row30[1] or 0,
+            "max_30d":       row30[2] or 0,
+            "count":         row30[3] or 0,
+            "avg_7d":        row7[0] if row7 and row7[0] else row30[0],
+            "price_history": history,
+        }
+    except Exception as e:
+        print(f"DB stats erreur: {e}")
         return None
 
-    # Extrait l'historique pour la velocity
-    price_history = []
-    if row[4]:
-        for entry in row[4].split(",")[:10]:
-            try:
-                parts = entry.split("|")
-                price_history.append(float(parts[0]))
-            except: pass
-
-    return {
-        "avg_30d":       row[0] or 0,
-        "min_30d":       row[1] or 0,
-        "max_30d":       row[2] or 0,
-        "count":         row[3] or 0,
-        "avg_7d":        row7[0] if row7 and row7[0] else row[0],
-        "price_history": price_history,
-    }
-
-def get_cross_site_prices(product_key, exclude_store=""):
-    """Récupère les prix du même produit sur d'autres sites"""
-    conn  = sqlite3.connect(DB_FILE)
-    c     = conn.cursor()
-    d7    = (datetime.now() - timedelta(days=7)).isoformat()
-    c.execute('''
-        SELECT store, MIN(price), link
-        FROM prices
-        WHERE product_key = ? AND timestamp > ? AND store != ?
-        GROUP BY store
-        ORDER BY price ASC
-    ''', (product_key, d7, exclude_store))
-    rows  = c.fetchall()
-    conn.close()
-    return [{"store": r[0], "price": r[1], "link": r[2]} for r in rows]
+def get_cross_site_prices(product_key, exclude_store):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        d7   = (datetime.now() - timedelta(days=7)).isoformat()
+        c.execute('''
+            SELECT store, MIN(price), link
+            FROM prices
+            WHERE product_key = ? AND timestamp > ? AND store != ?
+            GROUP BY store ORDER BY price ASC
+        ''', (product_key, d7, exclude_store))
+        rows = c.fetchall()
+        conn.close()
+        return [{"store": r[0], "price": r[1], "link": r[2]} for r in rows]
+    except:
+        return []
 
 def should_alert(product_id, current_price):
-    conn  = sqlite3.connect(DB_FILE)
-    c     = conn.cursor()
-    c.execute('SELECT last_price, last_alert FROM alerts_sent WHERE product_id = ?', (product_id,))
-    row   = c.fetchone()
-    conn.close()
-    if not row: return True
-    last_price, last_alert = row
-    if last_price and current_price < last_price * 0.85: return True
     try:
-        if datetime.now() - datetime.fromisoformat(last_alert) > timedelta(hours=24): return True
-    except: pass
-    return False
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute('SELECT last_price, last_alert FROM alerts_sent WHERE product_id = ?', (product_id,))
+        row  = c.fetchone()
+        conn.close()
+        if not row: return True
+        last_price, last_alert = row
+        if last_price and current_price < last_price * 0.85: return True
+        try:
+            if datetime.now() - datetime.fromisoformat(last_alert) > timedelta(hours=24): return True
+        except: pass
+        return False
+    except:
+        return True
 
 def mark_alerted(product_id, price):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute('''
-        INSERT INTO alerts_sent (product_id, last_price, last_alert, times_sent)
-        VALUES (?, ?, ?, 1)
-        ON CONFLICT(product_id) DO UPDATE SET
-            last_price = ?, last_alert = ?, times_sent = times_sent + 1
-    ''', (product_id, price, datetime.now().isoformat(), price, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        # Compatible avec toutes les versions SQLite
+        c.execute('SELECT product_id FROM alerts_sent WHERE product_id = ?', (product_id,))
+        exists = c.fetchone()
+        if exists:
+            c.execute('''
+                UPDATE alerts_sent SET last_price=?, last_alert=?, times_sent=times_sent+1
+                WHERE product_id=?
+            ''', (price, datetime.now().isoformat(), product_id))
+        else:
+            c.execute('''
+                INSERT INTO alerts_sent (product_id, last_price, last_alert, times_sent)
+                VALUES (?, ?, ?, 1)
+            ''', (product_id, price, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB alert erreur: {e}")
 
 def cleanup_old_data():
-    conn  = sqlite3.connect(DB_FILE)
-    c     = conn.cursor()
-    d60   = (datetime.now() - timedelta(days=60)).isoformat()
-    c.execute('DELETE FROM prices WHERE timestamp < ?', (d60,))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        d60  = (datetime.now() - timedelta(days=60)).isoformat()
+        c.execute('DELETE FROM prices WHERE timestamp < ?', (d60,))
+        conn.commit()
+        conn.close()
+    except: pass
+
+def get_db_stats():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute('SELECT COUNT(DISTINCT product_id), COUNT(*) FROM prices')
+        row = c.fetchone()
+        conn.close()
+        return row[0] or 0, row[1] or 0
+    except:
+        return 0, 0
 
 # ============================================================
-#   VELOCITY DETECTION
+#   DÉTECTION
 # ============================================================
 
 def detect_velocity(price_history, current_price):
-    """
-    Détecte la vitesse du drop de prix
-    Si le prix chute rapidement = boost de score
-    """
     if not price_history or len(price_history) < 2:
         return 0, False
+    prev = price_history[1] if len(price_history) > 1 else price_history[0]
+    if prev <= 0: return 0, False
+    velocity = (prev - current_price) / prev
+    return round(velocity, 3), velocity >= VELOCITY_ALERT
 
-    prev_price = price_history[0]  # Prix le plus récent avant celui-ci
-    if prev_price <= 0:
-        return 0, False
-
-    velocity = (prev_price - current_price) / prev_price
-
-    is_fast_drop = velocity >= VELOCITY_ALERT
-    return round(velocity, 3), is_fast_drop
-
-# ============================================================
-#   DÉTECTION D'ANOMALIE
-# ============================================================
-
-def detect_anomaly(product_id, name, current_price, original_price, stats, category):
+def detect_anomaly(product_id, current_price, original_price, stats):
     anomaly_type = None
     drop_vs_avg  = 0
     drop_vs_orig = 0
@@ -326,159 +314,91 @@ def detect_anomaly(product_id, name, current_price, original_price, stats, categ
     velocity     = 0
     is_fast_drop = False
 
-    # Rabais vs prix original affiché
     if original_price and original_price > current_price:
         drop_vs_orig = (original_price - current_price) / original_price
 
-    # Velocity detection
     if stats and stats.get("price_history"):
         velocity, is_fast_drop = detect_velocity(stats["price_history"], current_price)
 
-    # Anomalie vs historique
     if stats and stats["count"] >= 3:
         avg      = stats["avg_30d"]
         baseline = avg
-
         if avg > current_price:
             drop_vs_avg = (avg - current_price) / avg
-
-            if drop_vs_avg >= ANOMALY_ERROR:
-                anomaly_type = "PRICE_ERROR"
-            elif drop_vs_avg >= ANOMALY_HOT:
-                anomaly_type = "HOT_DEAL"
-            elif drop_vs_avg >= ANOMALY_GOOD:
-                anomaly_type = "GOOD_DEAL"
-
-        # Prix le plus bas jamais vu
+            if drop_vs_avg >= ANOMALY_ERROR:    anomaly_type = "PRICE_ERROR"
+            elif drop_vs_avg >= ANOMALY_HOT:    anomaly_type = "HOT_DEAL"
+            elif drop_vs_avg >= ANOMALY_GOOD:   anomaly_type = "GOOD_DEAL"
         if current_price <= stats["min_30d"] * 0.90 and not anomaly_type:
             anomaly_type = "ALL_TIME_LOW"
-
-        # Velocity sans anomalie de prix = flash sale
         if is_fast_drop and not anomaly_type:
             anomaly_type = "FLASH_SALE"
-
     else:
-        # Pas d'historique — utilise le rabais brut
-        if drop_vs_orig >= 0.60: anomaly_type = "PRICE_ERROR"
+        baseline = original_price
+        if drop_vs_orig >= 0.60:   anomaly_type = "PRICE_ERROR"
         elif drop_vs_orig >= 0.40: anomaly_type = "HOT_DEAL"
         elif drop_vs_orig >= 0.30: anomaly_type = "GOOD_DEAL"
-        baseline = original_price
 
     return anomaly_type, drop_vs_avg, drop_vs_orig, baseline, velocity, is_fast_drop
 
-# ============================================================
-#   CROSS-SITE ARBITRAGE DETECTION
-# ============================================================
-
-def detect_arbitrage(product_key, current_store, current_price, name):
-    """
-    Détecte les opportunités d'arbitrage entre sites
-    Ex: Walmart = $20, Best Buy = $80 → arbitrage possible
-    """
-    other_prices = get_cross_site_prices(product_key, current_store)
-    if not other_prices:
-        return None, []
-
-    opportunities = []
-    for other in other_prices:
-        if other["price"] > current_price * 1.30:  # 30%+ plus cher ailleurs
-            spread = (other["price"] - current_price) / other["price"]
-            opportunities.append({
-                "store":  other["store"],
-                "price":  other["price"],
-                "spread": spread,
-            })
-
-    if not opportunities:
-        return None, []
-
-    opportunities.sort(key=lambda x: x["spread"], reverse=True)
-    best = opportunities[0]
-
-    if best["spread"] >= 0.50:
-        return "ARBITRAGE_HIGH", opportunities
-    elif best["spread"] >= 0.30:
-        return "ARBITRAGE_LOW", opportunities
-
+def detect_arbitrage(product_key, current_store, current_price):
+    others = get_cross_site_prices(product_key, current_store)
+    opps   = []
+    for o in others:
+        if o["price"] > current_price * 1.30:
+            spread = (o["price"] - current_price) / o["price"]
+            opps.append({"store": o["store"], "price": o["price"], "spread": spread})
+    opps.sort(key=lambda x: x["spread"], reverse=True)
+    if not opps: return None, []
+    if opps[0]["spread"] >= 0.50: return "ARBITRAGE_HIGH", opps
+    if opps[0]["spread"] >= 0.30: return "ARBITRAGE_LOW", opps
     return None, []
 
-# ============================================================
-#   SCORING
-# ============================================================
-
-def calculate_score(anomaly_type, drop_vs_avg, drop_vs_orig, current_price,
-                    original_price, is_canada, stats, velocity, is_fast_drop,
-                    arbitrage_type, arbitrage_opps, category, multi_site=False):
+def calculate_score(anomaly_type, drop_vs_avg, drop_vs_orig, price,
+                    original, is_canada, stats, velocity, is_fast_drop,
+                    arb_type, arb_opps, multi_site=False):
     score, reasons = 0, []
 
-    # Score anomalie principale
     type_scores = {
-        "PRICE_ERROR":    6,
-        "HOT_DEAL":       4,
-        "ARBITRAGE_HIGH": 4,
-        "ALL_TIME_LOW":   3,
-        "ARBITRAGE_LOW":  3,
-        "FLASH_SALE":     3,
-        "GOOD_DEAL":      2,
+        "PRICE_ERROR": 6, "HOT_DEAL": 4, "ARBITRAGE_HIGH": 4,
+        "ALL_TIME_LOW": 3, "ARBITRAGE_LOW": 3, "FLASH_SALE": 3, "GOOD_DEAL": 2,
     }
+    labels = {
+        "PRICE_ERROR": "💣 ERREUR DE PRIX", "HOT_DEAL": "🔥 HOT DEAL",
+        "ARBITRAGE_HIGH": "🔄 ARBITRAGE", "ALL_TIME_LOW": "📉 PRIX LE PLUS BAS",
+        "ARBITRAGE_LOW": "🔄 ARBITRAGE", "FLASH_SALE": "⚡ FLASH SALE",
+        "GOOD_DEAL": "✅ BON DEAL",
+    }
+
     if anomaly_type:
         score += type_scores.get(anomaly_type, 0)
-
-    labels = {
-        "PRICE_ERROR":    "💣 ERREUR DE PRIX",
-        "HOT_DEAL":       "🔥 HOT DEAL",
-        "ARBITRAGE_HIGH": "🔄 ARBITRAGE HIGH",
-        "ALL_TIME_LOW":   "📉 PRIX LE PLUS BAS",
-        "ARBITRAGE_LOW":  "🔄 ARBITRAGE",
-        "FLASH_SALE":     "⚡ FLASH SALE",
-        "GOOD_DEAL":      "✅ BON DEAL",
-    }
-    if anomaly_type:
         reasons.append(labels.get(anomaly_type, anomaly_type))
 
-    # Amplitude du drop vs historique
     if drop_vs_avg >= 0.70:   score += 4; reasons.append(f"📊 -{drop_vs_avg:.0%} vs moy")
     elif drop_vs_avg >= 0.50: score += 3; reasons.append(f"📊 -{drop_vs_avg:.0%} vs moy")
     elif drop_vs_avg >= 0.35: score += 2; reasons.append(f"📊 -{drop_vs_avg:.0%} vs moy")
     elif drop_vs_avg >= 0.25: score += 1; reasons.append(f"📊 -{drop_vs_avg:.0%} vs moy")
 
-    # Rabais affiché
     if drop_vs_orig >= 0.70:   score += 3; reasons.append(f"💸 -{drop_vs_orig:.0%}")
     elif drop_vs_orig >= 0.50: score += 2; reasons.append(f"💸 -{drop_vs_orig:.0%}")
     elif drop_vs_orig >= 0.30: score += 1; reasons.append(f"💸 -{drop_vs_orig:.0%}")
 
-    # Économie absolue
-    savings = (original_price or 0) - current_price
+    savings = (original or 0) - price
     if savings >= 500:   score += 4; reasons.append(f"💰 -${savings:.0f}")
     elif savings >= 200: score += 3; reasons.append(f"💰 -${savings:.0f}")
     elif savings >= 100: score += 2; reasons.append(f"💰 -${savings:.0f}")
     elif savings >= 30:  score += 1; reasons.append(f"💰 -${savings:.0f}")
 
-    # Velocity — chute rapide = urgence
-    if is_fast_drop:
-        score += 2; reasons.append(f"⚡ chute rapide -{velocity:.0%}")
+    if is_fast_drop: score += 2; reasons.append(f"⚡ -{velocity:.0%} rapide")
+    if stats and stats["count"] >= 20: score += 2; reasons.append(f"✅ {stats['count']} obs")
+    elif stats and stats["count"] >= 5: score += 1
 
-    # Fiabilité des données
-    if stats:
-        if stats["count"] >= 20:   score += 2; reasons.append(f"✅ {stats['count']} obs")
-        elif stats["count"] >= 5:  score += 1; reasons.append(f"📊 {stats['count']} obs")
+    if arb_opps:
+        best = arb_opps[0]
+        score += 2; reasons.append(f"🔄 vs {best['store']} ${best['price']:.2f}")
 
-    # Arbitrage
-    if arbitrage_opps:
-        best_arb = arbitrage_opps[0]
-        score += 2; reasons.append(f"🔄 vs {best_arb['store']} ${best_arb['price']:.2f} (+{best_arb['spread']:.0%})")
-
-    # Catégorie
-    if category != "default":
-        reasons.append(f"📦 {category}")
-
-    # Site
     score += 2 if is_canada else 1
     reasons.append("🇨🇦" if is_canada else "🇺🇸")
-
-    # Multi-site
-    if multi_site:
-        score += 2; reasons.append("✅ multi-site")
+    if multi_site: score += 2; reasons.append("✅ multi-site")
 
     return score, " | ".join(reasons)
 
@@ -505,52 +425,40 @@ def format_deal(deal):
     original  = deal.get("original_price", 0)
     baseline  = deal.get("baseline", original or price)
     savings   = max((original or baseline or price) - price, 0)
-    link      = deal["link"]
-    store     = deal["store"]
-    market    = deal["market"]
-    reason    = deal["reason"]
-    multi     = deal.get("multi_site", False)
     stats     = deal.get("stats")
     drop_avg  = deal.get("drop_vs_avg", 0)
-    drop_orig = deal.get("drop_vs_orig", 0)
     velocity  = deal.get("velocity", 0)
     fast_drop = deal.get("is_fast_drop", False)
     arb_opps  = deal.get("arbitrage_opps", [])
-    category  = deal.get("category", "")
+    multi     = deal.get("multi_site", False)
+    cat       = deal.get("category", "")
 
     labels = {
-        "PRICE_ERROR":    ("💣", "ERREUR DE PRIX"),
-        "HOT_DEAL":       ("🔥", "HOT DEAL"),
-        "ARBITRAGE_HIGH": ("🔄", "OPPORTUNITÉ ARBITRAGE"),
-        "ALL_TIME_LOW":   ("📉", "PRIX LE PLUS BAS"),
-        "ARBITRAGE_LOW":  ("🔄", "ARBITRAGE"),
-        "FLASH_SALE":     ("⚡", "FLASH SALE"),
-        "GOOD_DEAL":      ("✅", "BON DEAL"),
+        "PRICE_ERROR": ("💣","ERREUR DE PRIX"), "HOT_DEAL": ("🔥","HOT DEAL"),
+        "ARBITRAGE_HIGH": ("🔄","ARBITRAGE"), "ALL_TIME_LOW": ("📉","PRIX LE PLUS BAS"),
+        "ARBITRAGE_LOW": ("🔄","ARBITRAGE"), "FLASH_SALE": ("⚡","FLASH SALE"),
+        "GOOD_DEAL": ("✅","BON DEAL"),
     }
-    emoji, tag = labels.get(atype, ("📊", "DEAL"))
+    emoji, tag = labels.get(atype, ("📊","DEAL"))
 
-    # Ligne historique
     hist_line = ""
     if stats and stats["count"] >= 3:
         hist_line = (
-            f"\n\n📊 <b>Historique ({stats['count']} observations):</b>\n"
-            f"   Moyenne 30j: <b>${stats['avg_30d']:.2f}</b>\n"
-            f"   Min: ${stats['min_30d']:.2f} | Max: ${stats['max_30d']:.2f}\n"
-            f"   Drop vs moyenne: <b>-{drop_avg:.0%}</b>"
+            f"\n\n📊 <b>Historique ({stats['count']} obs):</b>\n"
+            f"   Moyenne 30j: ${stats['avg_30d']:.2f}\n"
+            f"   Drop vs moy: <b>-{drop_avg:.0%}</b>"
         )
 
-    # Ligne velocity
-    vel_line = f"\n⚡ <b>Chute rapide: -{velocity:.0%} ce scan!</b>" if fast_drop else ""
-
-    # Ligne arbitrage
     arb_line = ""
     if arb_opps:
-        arb_line = "\n\n🔄 <b>Comparaison cross-site:</b>"
-        for a in arb_opps[:3]:
+        arb_line = "\n\n🔄 <b>Comparaison:</b>"
+        for a in arb_opps[:2]:
             arb_line += f"\n   {a['store']}: ${a['price']:.2f} (+{a['spread']:.0%})"
 
-    multi_line = "\n✅ <b>Confirmé multi-site!</b>" if multi else ""
-    cat_line   = f"\n📦 Catégorie: {category}" if category and category != "default" else ""
+    extras = ""
+    if fast_drop: extras += f"\n⚡ <b>Chute rapide: -{velocity:.0%}!</b>"
+    if multi:     extras += "\n✅ <b>Multi-site confirmé!</b>"
+    if cat and cat != "default": extras += f"\n📦 {cat}"
 
     return (
         f"{emoji} <b>{tag}</b> — Score {score}\n\n"
@@ -558,15 +466,13 @@ def format_deal(deal):
         f"💰 Prix: <b>${price:.2f}</b>\n"
         f"📉 Baseline: <s>${baseline:.2f}</s>\n"
         f"💸 Économie: <b>${savings:.2f}</b>"
-        f"{vel_line}"
+        f"{extras}"
         f"{hist_line}"
-        f"{arb_line}"
-        f"{multi_line}"
-        f"{cat_line}\n\n"
-        f"🏪 {store} {market}\n"
+        f"{arb_line}\n\n"
+        f"🏪 {deal['store']} {deal['market']}\n"
         f"📡 {deal.get('source','')}\n\n"
-        f"💡 <i>{reason}</i>\n\n"
-        f"🔗 <a href='{link}'>Voir le deal →</a>\n"
+        f"💡 <i>{deal['reason']}</i>\n\n"
+        f"🔗 <a href='{deal['link']}'>Voir le deal →</a>\n"
         f"⏰ {datetime.now().strftime('%H:%M:%S')}"
     )
 
@@ -606,7 +512,7 @@ def scrape_google(query, market="CA"):
             if "google." in link.lower(): continue
             if any(b in store.lower() for b in BLOCKED): continue
             if not name or len(name) < 3: continue
-            if not (MIN_PRICE <= price <= MAX_PRICE): continue
+            if not (MIN_PRICE <= (price or 0) <= MAX_PRICE): continue
             is_ca = any(t in store.lower() for t in TRUSTED_CA)
             is_us = any(t in store.lower() for t in TRUSTED_US)
             if not is_ca and not is_us: continue
@@ -647,7 +553,7 @@ def scrape_walmart(query, market="CA"):
                     link   = f"https://www.walmart.{suffix}/en/ip/{iid}"
             if not name or not link: continue
             if market == "CA": link = link.replace("walmart.com","walmart.ca")
-            if not (MIN_PRICE <= price <= MAX_PRICE): continue
+            if not (MIN_PRICE <= (price or 0) <= MAX_PRICE): continue
             results.append({
                 "name": name, "price": price, "original": original,
                 "link": link,
@@ -701,82 +607,78 @@ def run_scan():
 
     print(f"   Uniques: {len(unique)}")
 
-    # Sauvegarde TOUS les prix (apprentissage)
+    # Sauvegarde tous les prix
     for r in unique:
-        category    = detect_category(r["name"])
-        pid         = make_product_id(r["name"], r["store"])
-        pkey        = make_product_key(r["name"])
-        save_price(pid, pkey, r["name"], r["store"], category,
-                   r["price"], r.get("original", 0), r["link"], r["market"])
+        try:
+            pid  = make_product_id(r["name"], r["store"])
+            pkey = make_product_key(r["name"])
+            cat  = detect_category(r["name"])
+            save_price(pid, pkey, r["name"], r["store"], cat,
+                       r["price"], r.get("original", 0), r["link"], r["market"])
+        except: pass
 
-    # Analyse intelligente
+    # Analyse
     deals = []
     for r in unique:
-        price    = r["price"]
-        original = r.get("original", 0)
-        category = detect_category(r["name"])
-        min_sav, min_disc, cat = get_category_thresholds(r["name"])
+        try:
+            price    = r.get("price", 0)
+            original = r.get("original", 0)
+            if not price or price <= 0: continue
 
-        pid  = make_product_id(r["name"], r["store"])
-        pkey = make_product_key(r["name"])
+            pid      = make_product_id(r["name"], r["store"])
+            pkey     = make_product_key(r["name"])
+            stats    = get_price_stats(pid)
+            min_sav, cat = get_min_savings(r["name"])
 
-        # Stats historique
-        stats = get_price_stats(pid)
+            anomaly_type, drop_vs_avg, drop_vs_orig, baseline, velocity, is_fast_drop = detect_anomaly(
+                pid, price, original, stats
+            )
 
-        # Anomalie
-        anomaly_type, drop_vs_avg, drop_vs_orig, baseline, velocity, is_fast_drop = detect_anomaly(
-            pid, r["name"], price, original, stats, category
-        )
+            if not anomaly_type: continue
 
-        if not anomaly_type:
+            savings = max((original or baseline or price * 1.3) - price, 0)
+            if savings < min_sav: continue
+
+            arb_type, arb_opps = detect_arbitrage(pkey, r["store"], price)
+            if arb_type and not anomaly_type:
+                anomaly_type = arb_type
+
+            if not anomaly_type: continue
+
+            is_ca         = r["market"] == "CA"
+            score, reason = calculate_score(
+                anomaly_type, drop_vs_avg, drop_vs_orig, price, original,
+                is_ca, stats, velocity, is_fast_drop, arb_type, arb_opps
+            )
+
+            if score < 3: continue
+
+            deals.append({
+                "id":             pid,
+                "product_key":    pkey,
+                "name":           r["name"],
+                "price":          price,
+                "original_price": original,
+                "baseline":       baseline or original or price,
+                "link":           r["link"],
+                "store":          r["store"],
+                "market":         "🇨🇦" if is_ca else "🇺🇸",
+                "score":          score,
+                "reason":         reason,
+                "anomaly_type":   anomaly_type,
+                "drop_vs_avg":    drop_vs_avg,
+                "drop_vs_orig":   drop_vs_orig,
+                "stats":          stats,
+                "velocity":       velocity,
+                "is_fast_drop":   is_fast_drop,
+                "arbitrage_opps": arb_opps,
+                "category":       cat,
+                "source":         r["source"],
+                "multi_site":     False,
+            })
+        except Exception as e:
+            print(f"   Analyse erreur: {e}")
             continue
-
-        # Filtre par catégorie
-        savings = (original or baseline or price * 1.3) - price
-        if savings < min_sav:
-            continue
-
-        # Arbitrage
-        arb_type, arb_opps = detect_arbitrage(pkey, r["store"], price, r["name"])
-        if arb_type and not anomaly_type:
-            anomaly_type = arb_type
-
-        if not anomaly_type:
-            continue
-
-        is_ca = r["market"] == "CA"
-        score, reason = calculate_score(
-            anomaly_type, drop_vs_avg, drop_vs_orig, price, original,
-            is_ca, stats, velocity, is_fast_drop, arb_type, arb_opps,
-            category
-        )
-
-        if score < 3:
-            continue
-
-        deals.append({
-            "id":             pid,
-            "product_key":    pkey,
-            "name":           r["name"],
-            "price":          price,
-            "original_price": original,
-            "baseline":       baseline or original or price,
-            "link":           r["link"],
-            "store":          r["store"],
-            "market":         "🇨🇦" if is_ca else "🇺🇸",
-            "score":          score,
-            "reason":         reason,
-            "anomaly_type":   anomaly_type,
-            "drop_vs_avg":    drop_vs_avg,
-            "drop_vs_orig":   drop_vs_orig,
-            "stats":          stats,
-            "velocity":       velocity,
-            "is_fast_drop":   is_fast_drop,
-            "arbitrage_opps": arb_opps,
-            "category":       cat,
-            "source":         r["source"],
-            "multi_site":     False,
-        })
 
     # Multi-site check
     key_map = {}
@@ -791,7 +693,7 @@ def run_scan():
             d["score"]      += 2
             d["reason"]     += " | ✅ multi-site"
 
-    print(f"   Deals détectés: {len(deals)}")
+    print(f"   Deals: {len(deals)}")
     return deals
 
 # ============================================================
@@ -800,8 +702,7 @@ def run_scan():
 
 def run_bot():
     print("=" * 65)
-    print("   DEAL HUNTER ELITE V6")
-    print("   Price Memory + Velocity + Arbitrage + Categories")
+    print("   DEAL HUNTER ELITE V6 — STABLE")
     print(f"   Scan toutes les {SCAN_INTERVAL//60} min")
     print("=" * 65)
 
@@ -830,47 +731,47 @@ def run_bot():
         print(f"SCAN #{scan_count} — {start.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*65}")
 
-        if scan_count % 100 == 0:
-            cleanup_old_data()
+        try:
+            if scan_count % 100 == 0:
+                cleanup_old_data()
 
-        deals     = run_scan()
-        new_deals = [d for d in deals if should_alert(d["id"], d["price"])]
-        print(f"   Nouveaux: {len(new_deals)}")
+            deals     = run_scan()
+            new_deals = [d for d in deals if should_alert(d["id"], d["price"])]
+            print(f"   Nouveaux: {len(new_deals)}")
 
-        priority = {
-            "PRICE_ERROR": 6, "ARBITRAGE_HIGH": 5, "HOT_DEAL": 4,
-            "FLASH_SALE": 4, "ALL_TIME_LOW": 3, "ARBITRAGE_LOW": 3, "GOOD_DEAL": 2
-        }
-        new_deals.sort(
-            key=lambda x: (priority.get(x["anomaly_type"], 0), x["score"], x.get("multi_site", False)),
-            reverse=True
-        )
-
-        sent = 0
-        for deal in new_deals:
-            if sent >= MAX_ALERTS: break
-            labels = {
-                "PRICE_ERROR":"💣","HOT_DEAL":"🔥","ARBITRAGE_HIGH":"🔄",
-                "FLASH_SALE":"⚡","ALL_TIME_LOW":"📉","GOOD_DEAL":"✅"
+            priority = {
+                "PRICE_ERROR": 6, "ARBITRAGE_HIGH": 5, "HOT_DEAL": 4,
+                "FLASH_SALE": 4, "ALL_TIME_LOW": 3, "ARBITRAGE_LOW": 3, "GOOD_DEAL": 2
             }
-            emoji = labels.get(deal["anomaly_type"], "📊")
-            print(f"   {emoji} {deal['anomaly_type']} | Score:{deal['score']} | {deal['name'][:35]} | ${deal['price']:.2f} | {deal['store']}")
-            if send_telegram(format_deal(deal)):
-                mark_alerted(deal["id"], deal["price"])
-                total_sent += 1
-                sent       += 1
-                print(f"   ✓ Envoyé!")
-            time.sleep(0.3)
+            new_deals.sort(
+                key=lambda x: (priority.get(x["anomaly_type"], 0), x["score"]),
+                reverse=True
+            )
+
+            sent = 0
+            for deal in new_deals:
+                if sent >= MAX_ALERTS: break
+                labels = {
+                    "PRICE_ERROR":"💣","HOT_DEAL":"🔥","ARBITRAGE_HIGH":"🔄",
+                    "FLASH_SALE":"⚡","ALL_TIME_LOW":"📉","GOOD_DEAL":"✅"
+                }
+                emoji = labels.get(deal["anomaly_type"], "📊")
+                print(f"   {emoji} {deal['anomaly_type']} | Score:{deal['score']} | {deal['name'][:35]} | ${deal['price']:.2f}")
+                if send_telegram(format_deal(deal)):
+                    mark_alerted(deal["id"], deal["price"])
+                    total_sent += 1
+                    sent       += 1
+                    print(f"   ✓ Envoyé!")
+                time.sleep(0.3)
+
+        except Exception as e:
+            print(f"Erreur scan #{scan_count}: {e}")
 
         duration = (datetime.now() - start).seconds
-        print(f"\n   Scan #{scan_count} | {duration}s | Envoyés: {sent} | Total: {total_sent}")
+        print(f"\n   Scan #{scan_count} | {duration}s | Envoyés: {sent if 'sent' in dir() else 0} | Total: {total_sent}")
 
         if scan_count % 12 == 0:
-            conn = sqlite3.connect(DB_FILE)
-            c    = conn.cursor()
-            c.execute('SELECT COUNT(DISTINCT product_id), COUNT(*) FROM prices')
-            nb_p, nb_pr = c.fetchone()
-            conn.close()
+            nb_p, nb_pr = get_db_stats()
             send_telegram(
                 f"📊 <b>Rapport horaire</b>\n\n"
                 f"🔄 Scans: {scan_count}\n"
