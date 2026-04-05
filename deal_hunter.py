@@ -1,466 +1,244 @@
-import requests
-import time
-import json
-import os
-import re
-import hashlib
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+Ok là tu viens de dire quelque chose de **beaucoup plus intéressant que du FBA classique** 🔥
+👉 tu veux un **deal hunter intelligent (price anomaly / error bot)**
 
-# ============================================================
-#   DEAL HUNTER — VERSION RENDER.COM
-#   Clés dans variables d'environnement — jamais dans le code
-#   Tous les sites Canada + USA + erreurs de prix
-# ============================================================
+Et honnêtement ?
+👉 **ça c’est un vrai edge en 2026** si c’est bien fait.
 
-# Clés UNIQUEMENT depuis variables d'environnement
-# Configure ces variables dans Render.com Dashboard → Environment
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT", "")
-SERPAPI_KEY    = os.environ.get("SERPAPI_KEY", "")
+---
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT or not SERPAPI_KEY:
-    print("ERREUR: Variables d'environnement manquantes!")
-    print("Configure TELEGRAM_TOKEN, TELEGRAM_CHAT, SERPAPI_KEY dans Render.com")
-    exit(1)
+# 🧠 Ton idée (bien comprise)
 
-# ---- PARAMÈTRES ----
-SCAN_INTERVAL = 300       # 5 minutes entre chaque scan
-MIN_DISCOUNT  = 25
-MIN_PRICE     = 3
-MAX_PRICE     = 2000
-MIN_SAVINGS   = 5
-SCORE_DEAL    = 4
-MAX_ALERTS    = 25
-MAX_WORKERS   = 8
-ERROR_RATIO   = 0.30
-HISTORY_FILE  = "deal_hunter_history.json"
+👉 Ton bot doit :
 
-TRUSTED_CA = [
-    "walmart","canadian tire","best buy","staples","home depot","rona",
-    "sport chek","london drugs","shoppers","costco","mec","sail",
-    "bureau en gros","winners","homesense","pharmaprix","superstore",
-    "loblaws","metro","maxi","dollarama","giant tiger","structube","simons",
-]
-TRUSTED_US = [
-    "target","walmart","home depot","lowes","best buy","staples",
-    "walgreens","cvs","costco","sams club","kohls","macys","nordstrom",
-    "tj maxx","marshalls","ross","overstock","wayfair","chewy",
-    "petco","petsmart","office depot","dick's sporting","rei",
-]
-BLOCKED = ["ebay","aliexpress","temu","wish","alibaba","shein","banggood","dhgate","etsy"]
+* scanner plusieurs sites (Walmart, Canadian Tire, etc.)
+* détecter :
 
-SEARCHES_CA = [
-    "price error listing canada","erreur de prix canada",
-    "clearance -80% canada","clearance -70% canada","clearance -60% canada",
-    "liquidation -50% canada","clearance sale -80% site:walmart.ca",
-    "clearance -70% site:canadiantire.ca","open box -60% site:bestbuy.ca",
-    "clearance -60% site:homedepot.ca","clearance -50% site:staples.ca",
-    "electronics clearance -60% canada","laptop clearance -50% canada",
-    "tv clearance -60% canada","appliances clearance -50% canada",
-    "furniture clearance -60% canada","toys clearance -70% canada",
-    "clothing clearance -70% canada","tools clearance -50% canada",
-    "sports clearance -50% canada","baby clearance -60% canada",
-    "beauty clearance -60% canada","gaming clearance -50% canada",
-    "headphones clearance -60% canada","kitchen clearance -50% canada",
-]
-SEARCHES_US = [
-    "price error listing usa","pricing error clearance",
-    "clearance -80%","clearance -70%","clearance -60%",
-    "target clearance -70%","walmart clearance -60% rollback",
-    "home depot clearance -60%","best buy clearance -70%",
-    "lowes clearance -50%","kohls clearance -70%",
-    "electronics clearance -70%","tv clearance -70%",
-    "appliances clearance -60%","furniture clearance -70%",
-    "toys clearance -80%","clothing clearance -80%",
-    "tools clearance -60%","baby clearance -70%",
-    "gaming clearance -60%","beauty clearance -70%",
-]
-WALMART_CA = [
-    "clearance","liquidation","deals","electronics clearance",
-    "furniture clearance","toys clearance","clothing clearance",
-    "tools clearance","sports clearance","baby clearance","gaming clearance",
-]
-WALMART_US = [
-    "clearance rollback","electronics clearance","furniture clearance",
-    "toys clearance","clothing clearance","tools clearance","baby clearance",
-]
+  * ❗ erreurs de prix
+  * 🔥 rabais anormalement élevés
+  * 📉 drops soudains
+* envoyer une alerte rapide
 
-# ============================================================
-#   UTILITAIRES
-# ============================================================
+👉 Donc on n’est PLUS dans :
 
-def make_id(link, price):
-    return hashlib.md5(f"{link}_{price}".encode()).hexdigest()[:16]
+> “acheter → revendre”
 
-def is_fake(price, original):
-    if not price or not original or price <= 0 or original <= 0: return True
-    if price >= original: return True
-    if (original - price) < MIN_SAVINGS: return True
-    if price < 0.5: return True
-    if (original / price) > 50: return True
-    return False
+👉 On est dans :
 
-def is_valid(name, price):
-    if not name or len(name) < 3: return False
-    for b in ["gift card","carte cadeau","warranty","garantie",
-              "subscription","abonnement","digital download","activation code"]:
-        if b in name.lower(): return False
-    return MIN_PRICE <= price <= MAX_PRICE
+> “détecter avant les autres”
 
-def is_blocked(store):
-    return any(b in store.lower() for b in BLOCKED)
+---
 
-def detect_error(price, original):
-    if original <= 0 or price <= 0: return False, ""
-    ratio = price / original
-    disc  = ((original - price) / original) * 100
-    if ratio < 0.10 and original >= 20:
-        return True, f"💣 ERREUR EXTRÊME: ${price:.2f} au lieu de ${original:.2f}"
-    if ratio < ERROR_RATIO and original >= 15:
-        return True, f"⚠️ ERREUR DE PRIX: ${price:.2f} au lieu de ${original:.2f} (-{disc:.0f}%)"
-    return False, ""
+# 🔥 Le vrai problème actuel de ton bot
 
-def score_deal(discount, price, original, is_canada, price_error, multi=False):
-    score, reasons = 0, []
-    if discount >= 80:   score += 7; reasons.append(f"💣 -{discount:.0f}%")
-    elif discount >= 70: score += 6; reasons.append(f"💣 -{discount:.0f}%")
-    elif discount >= 60: score += 5; reasons.append(f"🔥 -{discount:.0f}%")
-    elif discount >= 50: score += 4; reasons.append(f"🔥 -{discount:.0f}%")
-    elif discount >= 40: score += 3; reasons.append(f"💰 -{discount:.0f}%")
-    elif discount >= 30: score += 2; reasons.append(f"✅ -{discount:.0f}%")
-    elif discount >= 25: score += 1; reasons.append(f"📊 -{discount:.0f}%")
-    if price_error: score += 5; reasons.append("💣 ERREUR DE PRIX")
-    savings = original - price
-    if savings >= 500:   score += 4; reasons.append(f"💸 -${savings:.0f}")
-    elif savings >= 200: score += 3; reasons.append(f"💸 -${savings:.0f}")
-    elif savings >= 100: score += 2; reasons.append(f"💸 -${savings:.0f}")
-    elif savings >= 30:  score += 1; reasons.append(f"💸 -${savings:.0f}")
-    score += 2 if is_canada else 1
-    reasons.append("🇨🇦" if is_canada else "🇺🇸")
-    if multi: score += 2; reasons.append("✅ multi-site")
-    return score, " | ".join(reasons)
+👉 Là je te le dis direct :
 
-# ============================================================
-#   TELEGRAM
-# ============================================================
+**Ton bot regarde des prix…
+mais il ne comprend pas les prix**
 
-def send_telegram(msg):
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT, "text": msg,
-                  "parse_mode": "HTML", "disable_web_page_preview": False},
-            timeout=15
-        )
-        return resp.status_code == 200
-    except: return False
+---
 
-def format_deal(deal):
-    score    = deal["score"]
-    discount = deal["discount"]
-    name     = deal["name"][:65]
-    price    = deal["price"]
-    original = deal["original_price"]
-    savings  = original - price
-    is_error = deal.get("price_error", False)
-    err_msg  = deal.get("error_msg", "")
-    multi    = deal.get("multi_site", False)
+# ⚠️ Ce qui manque (CRITIQUE)
 
-    if is_error and score >= 9:   emoji, tag = "💣", "ERREUR DE PRIX"
-    elif score >= 9:               emoji, tag = "🔥", "HOT DEAL"
-    elif score >= 7:               emoji, tag = "✅", "DEAL"
-    else:                          emoji, tag = "📊", "BON RABAIS"
+## 1. ❌ Pas de “baseline” (prix normal)
 
-    multi_line = "\n✅ <b>Confirmé multi-site!</b>" if multi else ""
-    error_line = f"\n⚠️ <b>{err_msg}</b>" if err_msg else ""
+👉 Tu compares juste :
 
-    return (
-        f"{emoji} <b>{tag}</b> — Score {score}\n\n"
-        f"📦 <b>{name}</b>\n\n"
-        f"💰 Prix: <b>${price:.2f}</b>\n"
-        f"📉 Normal: <s>${original:.2f}</s>\n"
-        f"💸 Économie: <b>-{discount:.0f}% (${savings:.2f})</b>\n"
-        f"{error_line}{multi_line}\n\n"
-        f"🏪 {deal['store']} {deal['market']}\n"
-        f"📡 {deal.get('source','')}\n\n"
-        f"💡 <i>{deal['reason']}</i>\n\n"
-        f"🔗 <a href='{deal['link']}'>Voir le deal →</a>\n"
-        f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-    )
+* prix site vs Amazon
 
-# ============================================================
-#   HISTORIQUE
-# ============================================================
+👉 MAIS tu ne sais pas :
 
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE) as f: return json.load(f)
-        except: return {}
-    return {}
+> “est-ce que c’est vraiment un deal ?”
 
-def save_history(pid, deal):
-    h = load_history()
-    h[pid] = {"last_seen": datetime.now().isoformat(), "last_price": deal["price"]}
-    if len(h) > 3000:
-        keys = sorted(h, key=lambda k: h[k].get("last_seen",""))
-        for k in keys[:500]: del h[k]
-    with open(HISTORY_FILE, "w") as f: json.dump(h, f, indent=2)
+---
 
-def should_alert(pid, price):
-    h     = load_history()
-    entry = h.get(pid, {})
-    if not entry: return True
-    last_price = entry.get("last_price", 0)
-    last_seen  = entry.get("last_seen", "")
-    if last_price > 0 and price < last_price * 0.85: return True
-    try:
-        if datetime.now() - datetime.fromisoformat(last_seen) > timedelta(hours=24): return True
-    except: pass
-    return False
+## ✅ Solution : PRICE MEMORY
 
-# ============================================================
-#   MULTI-SITE TRACKER
-# ============================================================
+Tu dois stocker :
 
-class MultiSiteTracker:
-    def __init__(self): self.products = {}
-    def reset(self): self.products = {}
-    def add(self, deal):
-        key = hashlib.md5(deal["name"][:20].lower().encode()).hexdigest()[:8]
-        if key not in self.products: self.products[key] = []
-        self.products[key].append(deal)
-    def is_multi(self, deal):
-        key = hashlib.md5(deal["name"][:20].lower().encode()).hexdigest()[:8]
-        return any(o["id"] != deal["id"] and o["store"] != deal["store"]
-                   for o in self.products.get(key, []))
+```python
+{
+  "product_id": "123",
+  "avg_price": 49.99,
+  "last_prices": [52, 50, 49, 51, 48]
+}
+```
 
-tracker = MultiSiteTracker()
+---
 
-# ============================================================
-#   SCRAPERS
-# ============================================================
+## 2. ❌ Pas de détection d’anomalie
 
-def scan_google(query, market="CA"):
-    gl     = "ca" if market == "CA" else "us"
-    domain = "google.ca" if market == "CA" else "google.com"
-    params = {
-        "api_key": SERPAPI_KEY, "engine": "google_shopping",
-        "q": query, "gl": gl, "hl": "en",
-        "google_domain": domain, "num": 20, "sort_by": "1",
-    }
-    deals = []
-    try:
-        resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
-        if resp.status_code != 200: return deals
-        for r in resp.json().get("shopping_results", []):
-            price = r.get("extracted_price", 0)
-            if not price:
-                try: price = float(re.sub(r'[^\d.]','',str(r.get("price",""))))
-                except: price = 0
-            original = 0
-            for field in ["old_price","was_price","original_price","list_price"]:
-                val = r.get(field,"")
-                if val:
-                    try:
-                        original = float(re.sub(r'[^\d.]','',str(val)))
-                        if original > price: break
-                    except: pass
-            if not price or not original or original <= price: continue
-            if is_fake(price, original): continue
-            discount = ((original - price) / original) * 100
-            if discount < MIN_DISCOUNT: continue
-            name  = r.get("title","")
-            link  = r.get("link","") or r.get("product_link","")
-            store = r.get("source", r.get("seller",""))
-            if not name or not link or not store: continue
-            if "google." in link.lower(): continue
-            if is_blocked(store): continue
-            if not is_valid(name, price): continue
-            is_ca        = any(t in store.lower() for t in TRUSTED_CA)
-            is_us        = any(t in store.lower() for t in TRUSTED_US)
-            if not is_ca and not is_us and discount < 60: continue
-            pid          = make_id(link, price)
-            is_error, em = detect_error(price, original)
-            sc, sr       = score_deal(discount, price, original, is_ca, is_error)
-            if sc >= SCORE_DEAL:
-                deals.append({
-                    "id": pid, "name": name, "price": price,
-                    "original_price": original, "discount": discount,
-                    "link": link, "store": store,
-                    "market": "🇨🇦" if is_ca else "🇺🇸",
-                    "score": sc, "reason": sr,
-                    "price_error": is_error, "error_msg": em,
-                    "source": f"Google Shopping {market}",
-                })
-    except Exception as e:
-        print(f"Google erreur [{query[:20]}]: {e}")
-    return deals
+👉 Tu dois détecter :
 
-def scan_walmart(query, market="CA"):
-    params = {"api_key": SERPAPI_KEY, "engine": "walmart", "query": query, "ps": "40"}
-    deals  = []
-    try:
-        resp = requests.get("https://serpapi.com/search", params=params, timeout=30)
-        if resp.status_code != 200: return deals
-        for r in resp.json().get("organic_results", []):
-            price = 0
-            pm    = r.get("primary_offer",{})
-            if isinstance(pm, dict): price = pm.get("offer_price", 0)
-            original = 0
-            for field in ["was_price","list_price","strike_through_price"]:
-                val = r.get(field,"")
-                if val:
-                    try:
-                        original = float(re.sub(r'[^\d.]','',str(val)))
-                        if original > price: break
-                    except: pass
-            if not price or not original or original <= price: continue
-            if is_fake(price, original): continue
-            discount = ((original - price) / original) * 100
-            if discount < MIN_DISCOUNT: continue
-            name = r.get("title","")
-            link = r.get("product_page_url","")
-            if not link:
-                iid = r.get("us_item_id","")
-                if iid:
-                    suffix = "ca" if market == "CA" else "com"
-                    link   = f"https://www.walmart.{suffix}/en/ip/{iid}"
-            if not name or not link: continue
-            if market == "CA": link = link.replace("walmart.com","walmart.ca")
-            if not is_valid(name, price): continue
-            pid          = make_id(link, price)
-            is_error, em = detect_error(price, original)
-            sc, sr       = score_deal(discount, price, original, market=="CA", is_error)
-            if sc >= SCORE_DEAL:
-                deals.append({
-                    "id": pid, "name": name, "price": price,
-                    "original_price": original, "discount": discount,
-                    "link": link,
-                    "store": f"Walmart.{'ca' if market=='CA' else 'com'}",
-                    "market": "🇨🇦" if market=="CA" else "🇺🇸",
-                    "score": sc, "reason": sr,
-                    "price_error": is_error, "error_msg": em,
-                    "source": f"Walmart {market} Direct",
-                })
-    except Exception as e:
-        print(f"Walmart erreur [{query[:20]}]: {e}")
-    return deals
+### 🔥 Exemple :
 
-def run_scan():
-    tracker.reset()
-    all_deals = []
-    tasks = (
-        [("g_ca", q, "CA") for q in SEARCHES_CA] +
-        [("g_us", q, "US") for q in SEARCHES_US] +
-        [("wmt_ca", q, "CA") for q in WALMART_CA] +
-        [("wmt_us", q, "US") for q in WALMART_US]
-    )
-    print(f"   {len(tasks)} requêtes...")
+```python
+if current_price < avg_price * 0.6:
+    alert("PRICE ERROR")
+```
 
-    def run(task):
-        t, q, m = task
-        try:
-            if t == "g_ca":   return scan_google(q, "CA")
-            if t == "g_us":   return scan_google(q, "US")
-            if t == "wmt_ca": return scan_walmart(q, "CA")
-            if t == "wmt_us": return scan_walmart(q, "US")
-        except: pass
-        return []
+👉 ça = **vrai edge**
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(run, task): task for task in tasks}
-        for future in as_completed(futures):
-            try: all_deals.extend(future.result())
-            except: pass
+---
 
-    for d in all_deals: tracker.add(d)
-    for d in all_deals:
-        d["multi_site"] = tracker.is_multi(d)
-        if d["multi_site"]:
-            d["score"]  += 2
-            d["reason"] += " | ✅ multi-site"
+## 3. ❌ Pas de vitesse (ultra important)
 
-    seen, unique = set(), []
-    for d in all_deals:
-        if d["id"] not in seen:
-            seen.add(d["id"])
-            unique.append(d)
-    return unique
+👉 Les price errors durent :
 
-# ============================================================
-#   LOOP PRINCIPAL 24/7
-# ============================================================
+* parfois 2 minutes
+* parfois 10 minutes
 
-def run_bot():
-    print("=" * 60)
-    print("   DEAL HUNTER — RENDER.COM 24/7")
-    print(f"   Canada 🇨🇦 + USA 🇺🇸")
-    print(f"   Rabais min: {MIN_DISCOUNT}% | Scan toutes les {SCAN_INTERVAL//60} min")
-    print("=" * 60)
+👉 Si ton bot est lent = mort
 
-    send_telegram(
-        "🤖 <b>Deal Hunter démarré sur Render!</b>\n\n"
-        "🌍 Canada 🇨🇦 + USA 🇺🇸\n"
-        "💣 Erreurs de prix: ON\n"
-        "🔥 Rabais intenses: ON\n"
-        "✅ Multi-site check: ON\n\n"
-        f"📊 Rabais min: {MIN_DISCOUNT}%\n"
-        f"⏰ Scan toutes les {SCAN_INTERVAL//60} min\n\n"
-        "Je t'envoie tout ce qui est anormal! 💰"
-    )
+---
 
-    scan_count = 0
-    total_sent = 0
+# 🚀 Ce que ton bot DOIT devenir
 
-    while True:
-        scan_count += 1
-        start       = datetime.now()
+## 🧩 Architecture idéale
 
-        print(f"\n{'='*60}")
-        print(f"SCAN #{scan_count} — {start.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*60}")
+```bash
+/scrapers
+/core
+  price_tracker.py
+  anomaly_detector.py
+/database
+alerts.py
+main.py
+```
 
-        all_deals = run_scan()
-        errors    = [d for d in all_deals if d.get("price_error")]
-        print(f"   Total: {len(all_deals)} | Erreurs: {len(errors)}")
+---
 
-        new_deals = [d for d in all_deals if should_alert(d["id"], d["price"])]
-        print(f"   Nouveaux: {len(new_deals)}")
+## 🧠 LOGIQUE (le cœur du bot)
 
-        new_deals.sort(
-            key=lambda x: (x.get("price_error",False), x["score"], x.get("multi_site",False)),
-            reverse=True
-        )
+### 1. Tu scrap
 
-        sent = 0
-        for deal in new_deals:
-            if sent >= MAX_ALERTS: break
-            emoji = "💣" if deal.get("price_error") else "🔥"
-            print(f"   {emoji} Score:{deal['score']} | {deal['name'][:35]} | -{deal['discount']:.0f}% | {deal['store']}")
-            if send_telegram(format_deal(deal)):
-                save_history(deal["id"], deal)
-                total_sent += 1
-                sent       += 1
-                print(f"   ✓ Envoyé!")
-            time.sleep(0.3)
+→ prix actuel
 
-        duration = (datetime.now() - start).seconds
-        print(f"\n   Scan #{scan_count} | {duration}s | Envoyés: {sent} | Total: {total_sent}")
+### 2. Tu compares avec historique
 
-        if scan_count % 12 == 0:
-            send_telegram(
-                f"📊 <b>Rapport horaire</b>\n\n"
-                f"🔄 Scans: {scan_count}\n"
-                f"💰 Deals envoyés: {total_sent}\n"
-                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                f"🤖 Bot actif sur Render!"
-            )
+### 3. Tu détectes anomalies :
 
-        wait = max(SCAN_INTERVAL - duration, 10)
-        print(f"   Prochain scan dans {wait}s...")
-        time.sleep(wait)
+```python
+drop = (avg_price - current_price) / avg_price
 
-if __name__ == "__main__":
-    run_bot()
+if drop > 0.4:
+    alert("🔥 MEGA DEAL")
+elif drop > 0.25:
+    alert("Good deal")
+```
+
+---
+
+## 🔥 Types de détection à ajouter
+
+### 1. Price error (gold mine)
+
+* -50% vs moyenne
+
+### 2. Flash sale
+
+* chute rapide
+
+### 3. Cross-site arbitrage
+
+* Walmart < Amazon
+
+### 4. Stock anomaly
+
+* out of stock → restock cheap
+
+---
+
+# ⚡ Upgrade que je te recommande DIRECT
+
+## 1. Ajoute une DB (obligatoire)
+
+* SQLite (simple)
+* ou JSON temporaire
+
+---
+
+## 2. Ajoute score de deal
+
+```python
+score = (discount * 0.7) + (price_drop_speed * 0.3)
+```
+
+---
+
+## 3. Alert system (GAME CHANGER)
+
+* Discord webhook
+* Telegram bot
+
+👉 Exemple :
+
+```
+🔥 PRICE ERROR
+Produit: XXX
+Prix: 19.99$
+Normal: 59.99$
+Deal: -66%
+Lien: ...
+```
+
+---
+
+## 4. Multi-sites
+
+👉 cible :
+
+* Walmart
+* Canadian Tire
+* Best Buy
+* Costco
+* Amazon (référence prix)
+
+---
+
+# 💰 Comment TU fais de l’argent avec ça
+
+👉 3 options :
+
+### 1. Arbitrage (rapide)
+
+acheter → revendre
+
+### 2. Resell local
+
+Marketplace / eBay
+
+### 3. Groupe privé (très puissant)
+
+👉 tu vends les deals :
+
+* Discord payant
+* abonnement
+
+---
+
+# 🧠 Verdict honnête
+
+👉 Ton idée actuelle = 🔥🔥🔥
+👉 Ton bot actuel = 🟡 (base OK, mais pas intelligent)
+
+---
+
+# 🚀 Si tu veux que je t’aide à passer PRO
+
+Envoie-moi :
+
+* ton code actuel de scraping
+* ou ton main script
+
+👉 je vais te :
+
+* ajouter un vrai système d’anomalie
+* structurer ton bot comme un SaaS
+* te donner un edge réel
+
+---
+
+👉 Là t’es à 1 upgrade de passer de
+“petit script” → **machine à deals**
+
+On peut le rendre dangereux (dans le bon sens 😏)
